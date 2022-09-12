@@ -1,0 +1,50 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Reference: 
+[1] Anna Cichonska, Juho Rousu, Pekka Marttinen, Antti J. Kangas, Pasi Soininen, Terho Lehtimäki, Olli T. Raitakari, Marjo-Riitta Järvelin, Veikko Salomaa, Mika Ala-Korpela, Samuli Ripatti, Matti Pirinen, metaCCA: summary statistics-based multivariate meta-analysis of genome-wide association studies using canonical correlation analysis, Bioinformatics, Volume 32, Issue 13, 1 July 2016, Pages 1981–1989, https://doi.org/10.1093/bioinformatics/btw052
+
+
+```{r, message=FALSE}
+
+library(metaCCA)
+library(tidyverse)
+data(package='metaCCA')
+```
+
+```{r}
+sxy_full_study_1 = read.table('/Users/gurdeep/Documents/tb3/Blood Pressure/data/processed/sxy_full_study_1.txt', header = TRUE)
+
+head(sxy_full_study_1)
+```
+
+
+```{r}
+# reformatting dataframe to compute SYY
+rownames(sxy_full_study_1) <- as.character(sxy_full_study_1$SNPID_UKB)
+sxy_full_study_1 <- sxy_full_study_1[, !(colnames(sxy_full_study_1) %in% c("SNPID_UKB"))]
+head(sxy_full_study_1)
+```
+
+
+```{r}
+# if the alleles are not converted to factor characters
+sxy_full_study_1$allele_0 <- as.factor(sxy_full_study_1$allele_0)
+sxy_full_study_1$allele_1 <- as.factor(sxy_full_study_1$allele_1)
+```
+
+
+```{r}
+syy_full_study_1 <- estimateSyy(sxy_full_study_1)
+head(syy_full_study_1)
+```
+
+```{r}
+write.table(syy_full_study_1, file="/Users/gurdeep/Documents/tb3/Blood Pressure/data/processed/syy_full_study_1.txt", sep = "\t")
+```
+
+

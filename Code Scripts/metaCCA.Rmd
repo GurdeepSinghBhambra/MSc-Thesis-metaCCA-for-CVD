@@ -1,0 +1,270 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+References: 
+[1] Osborne A. gene_based_multivariateSNP_metaCCA.r. https://github.com/AmyJaneOsborne/CCA_scripts/blob/main/gene_based_multivariateSNP_metaCCA.r
+
+[2] Anna Cichonska, Juho Rousu, Pekka Marttinen, Antti J. Kangas, Pasi Soininen, Terho Lehtimäki, Olli T. Raitakari, Marjo-Riitta Järvelin, Veikko Salomaa, Mika Ala-Korpela, Samuli Ripatti, Matti Pirinen, metaCCA: summary statistics-based multivariate meta-analysis of genome-wide association studies using canonical correlation analysis, Bioinformatics, Volume 32, Issue 13, 1 July 2016, Pages 1981–1989, https://doi.org/10.1093/bioinformatics/btw052
+
+```{r}
+library(tidyverse)
+library(metaCCA)
+
+setwd("~/Documents/tb3/Blood Pressure")
+```
+
+
+```{r}
+load_sxy_study1 <- function(filepath){
+    sxy_study1 <- read.delim(filepath, sep="\t")
+    
+    sxy_study1$SNPID_UKB <- as.character(sxy_study1$SNPID_UKB)
+    
+    rownames(sxy_study1) <- sxy_study1$SNPID_UKB
+    
+    sxy_study1 <- sxy_study1[,!(names(sxy_study1) %in% c('SNPID_UKB'))]
+    
+    sxy_study1$allele_0 <- as.factor(toupper(sxy_study1$allele_0))
+    sxy_study1$allele_1 <- as.factor(toupper(sxy_study1$allele_1))
+    
+    sxy_study1$sys_b <- as.numeric(sxy_study1$sys_b)
+    sxy_study1$dia_b <- as.numeric(sxy_study1$dia_b)
+    sxy_study1$pul_b <- as.numeric(sxy_study1$pul_b)
+
+    sxy_study1 <- sxy_study1[(sxy_study1$sys_se!=0),]
+    sxy_study1 <- sxy_study1[(sxy_study1$dia_se!=0),]
+    sxy_study1 <- sxy_study1[(sxy_study1$pul_se!=0),]
+    
+    print("----------------------------------------")
+    print("SXY_STUDY_1 file loaded")
+    print(paste("SNPS:", nrow(sxy_study1)))
+    print(paste("TRAITS:", as.numeric((ncol(sxy_study1)-2) / 2)))
+    print("----------------------------------------")
+    
+    return(sxy_study1)
+}
+
+load_syy_study1 <- function(filepath){
+    syy_study1 <- read.delim(filepath, sep="\t")
+    
+    syy_study1$sys <- as.numeric(syy_study1$sys)
+    syy_study1$dia <- as.numeric(syy_study1$dia)
+    syy_study1$pul <- as.numeric(syy_study1$pul)
+    
+    print("----------------------------------------")
+    print("SYY_STUDY_1 file loaded")
+    print(paste("TRAITS COUNT:", nrow(syy_study1)))
+    cat("TRAITS:", paste(" ", rownames(syy_study1)), "\n")
+    print("----------------------------------------")
+    
+    return(syy_study1)
+}
+
+load_lookup_table <- function(filepath, snp_ids){
+    lookup_table <- read.delim(filepath, sep="\t")
+    
+    lookup_table$BP <- as.numeric(lookup_table$BP)
+    lookup_table$CHR <- as.numeric(lookup_table$CHR)
+    
+    lookup_table$SNP <- as.character(lookup_table$SNP)
+    lookup_table$REF <- toupper(as.character(lookup_table$REF))
+    lookup_table$ALT <- toupper(as.character(lookup_table$ALT))
+    lookup_table$GENES <- as.character(lookup_table$ANNOT)
+    
+    lookup_table <- lookup_table[(lookup_table$SNP %in% snp_ids),!(names(lookup_table) %in% c('ANNOT'))]
+    
+    print("----------------------------------------")
+    print("Lookup Table file loaded")
+    print(paste("SNPS:", nrow(lookup_table)))
+    print(paste("GENES:", length(unique(lookup_table$GENES))))
+    print("----------------------------------------")
+    
+    return(lookup_table)
+}
+
+load_sxx_study1 <- function(filepath, snp_ids){
+    sxx_study1 <- read.delim(filepath, header=FALSE)
+    
+    split_on_single_space_and_get_first_element <- function(s){
+        s <- as.integer(simplify2array(strsplit(s, " "))[1])
+        if(is.na(s)){
+            stop(paste("failed to convert ", s, " to integer"))
+        }
+        return(s)
+    }
+
+    sxx_study1$V512 <- as.integer(simplify2array(sapply(sxx_study1$V512, split_on_single_space_and_get_first_element)))
+    sxx_study1$V1 <- as.numeric(sxx_study1$V1) 
+    sxx_study1$V3 <- as.character(sxx_study1$V3) 
+    
+    sxx_study1 <- sxx_study1[(sxx_study1$V3 %in% snp_ids), c(1:512)] 
+    
+    print("----------------------------------------")
+    print("SXX_STUDY_1 file loaded")
+    print(paste("SNPS:", nrow(sxx_study1)))
+    print("----------------------------------------")
+    
+    return(sxx_study1)
+}
+
+# Loading all files
+syy_study1 <- load_syy_study1("./data/processed/syy_full_study_1.txt")
+sxy_study1 <- load_sxy_study1("./data/processed/sxy_study_1_maf1_pruned_singlehg19genes.txt")
+lookup_table <- load_lookup_table("./data/processed/annotated_lookup_singlehg19genes.txt", simplify2array(rownames(sxy_study1)))
+sxx_study1 <- load_sxx_study1("./data/g1000p3_EUR/g1000p3_EUR_common_GTs_sorted_nohead_ld02_pruned_singlehg19genes.txt", simplify2array(rownames(sxy_study1)))
+```
+
+
+```{r}
+get_sxx_per_chrom <- function(chr, sxx_study1, lookup_table, verbose=FALSE){
+    snp_ids <- lookup_table[(lookup_table$CHR == chr), ]$SNP
+    
+    # Creating GT from SXX and lookup_table
+    gt <- data.frame(sxx_study1[(sxx_study1$V1 == chr), c(3, 10:512)])
+    gt <- gt[(gt$V3 %in% snp_ids), ]
+    gt <- gt[!duplicated(gt$V3), ]
+    
+    # just for test
+    #gt <- gt[c(1:5), ]
+    
+    # Formating GT to SXX format
+    rownames(gt) <- gt$V3
+    gt <- gt[order(rownames(gt)), ]
+    gt <- as.data.frame(t(gt[ , 2:504]))
+    
+    # Calculating Corr 
+    gt <- Filter(function(x) sd(x) != 0, gt) 
+    gt <- cor(gt)
+    
+    # Filtering Corr == 0 values
+    copy_gt <- data.frame(gt)
+    copy_gt[lower.tri(copy_gt)] <- NA
+    zeroes <- unique(rownames(which(copy_gt == 0, arr.ind=TRUE)))
+    gt <- gt[!(rownames(gt) %in% zeroes), !(colnames(gt) %in% zeroes)]
+    
+    return(gt)
+}
+
+
+# test
+#dim(get_sxx_per_chrom(1, sxx_study1, lookup_table))
+```
+
+
+
+```{r}
+
+run_metaCCA <- function(sxy_study1, sxx_study1, lookup_table){
+    all_chromosomes <- sort(unique(lookup_table$CHR))
+    
+    all_results <- data.frame()
+    
+    for(chr in all_chromosomes){
+        sxx_study1_per_chr <- get_sxx_per_chrom(chr = chr, sxx_study1 = sxx_study1, lookup_table = lookup_table)
+        lookup_table_filtered_per_chr <- lookup_table[lookup_table$SNP %in% rownames(sxx_study1_per_chr), ]
+        sxy_study1_per_chr <- sxy_study1[rownames(sxy_study1) %in% lookup_table_filtered_per_chr$SNP, ]
+        
+        genes_in_chr <- unique(lookup_table_filtered_per_chr$GENES)
+        
+        results <- data.frame(no_SNPs = numeric(), SNPs = character(), no_PTs = numeric(), PTs = character(), r_1 = numeric(), pval_minuslog10=numeric(), pval=numeric(), genes=character(), chrom=numeric(), stringsAsFactors=FALSE)
+        
+        cat("------------------------------------------------------------------", "\n")
+        cat("Chrom: ", chr, "\n")
+        cat("Filtered SNPs count: ", nrow(sxx_study1_per_chr), "\n")
+        cat("Genes in chr: ", length(genes_in_chr), "\n")
+        
+        for(gene in genes_in_chr){
+            lookup_table_filtered_per_chr_per_gene <- lookup_table_filtered_per_chr[lookup_table_filtered_per_chr$GENES == gene, ]
+            
+            if(nrow(lookup_table_filtered_per_chr_per_gene) > 0){
+                snps_per_chrom_per_gene <- unique(lookup_table_filtered_per_chr_per_gene$SNP)  
+                analysis_type = 2
+                if(length(snps_per_chrom_per_gene)==1){ analysis_type=1 }
+                
+                metaCCA_res <- metaCcaGp(nr_studies = 1, 
+                                         S_XY = list(sxy_study1_per_chr), 
+                                         std_info = c(0),
+                                         S_YY = list(syy_study1),
+    					                 N = c(361411), 
+    					                 analysis_type = analysis_type, 
+    					                 SNP_id = snps_per_chrom_per_gene, 
+    					                 S_XX = list(sxx_study1_per_chr))
+                
+                names(metaCCA_res) <- c("r_1", "pval_minuslog10")
+                all.can = as.numeric(metaCCA_res$r_1)
+                all.can[all.can>0.99] = 0.99
+                
+                # appending results
+                next_row_index <- nrow(results)+1
+    			results[next_row_index, 1] <- length(snps_per_chrom_per_gene)
+    			results[next_row_index, 2] <- paste(snps_per_chrom_per_gene, collapse="_")
+    			results[next_row_index, 3] <- ncol(syy_study1)
+    			results[next_row_index, 4] <- "SYS_DIA_PUL"
+    			results[next_row_index, 5] <- metaCCA_res$r_1
+    			results[next_row_index, 6] <- metaCCA_res$pval_minuslog10
+    			results[next_row_index, 7] <- 10^(-metaCCA_res$pval_minuslog10)
+    			results[next_row_index, 8] <- paste(gene, collapse="_")
+    			results[next_row_index, 9] <- chr
+    			
+            }
+        }
+    
+        results <- results[ order(results$pval), ]
+        
+        all_results <- rbind(all_results, results)
+        
+        #cat("Results saved at: ./data/metacca_results.txt \n")
+        cat("Results Recorded", "\n")
+        cat("------------------------------------------------------------------", "\n\n")
+    }
+    
+    write.table(all_results, "./data/metacca_results.txt", row.names=FALSE)
+    cat("\nResults save at: ", "./data/metacca_results.txt", "\n")
+}
+
+run_metaCCA(sxy_study1, sxx_study1, lookup_table)
+```
+
+
+```{r}
+# Getting genes using bonferroni correction
+all_results <- read.table("./data/metacca_results.txt", header=TRUE)
+
+all_results$pval <- as.factor(all_results$pval)
+
+all_results$pval_num <- as.numeric(levels(as.factor(all_results$pval)))[all_results$pval]
+all_results$pBonf <- p.adjust(all_results$pval_num, method="bonferroni")
+
+write.table(all_results,"./data/metcca_results_all_pBonf.txt", col.names=T,quote=F,row.names=F)
+
+# filtering by 0.05 threshold and sorting on pbonf values
+sigBonf <- all_results[all_results$pBonf<0.05, ]
+sigBonf <- sigBonf[order(sigBonf$pBonf), ]
+
+cat("----------------------- Filtered data INFO -----------------------", "\n")
+cat("Genes: ", length(unique(sigBonf$genes)), "/", length(unique(all_results$genes)), "\n")
+cat("------------------------------------------------------------------", "\n")
+
+write.table(sigBonf,"./data/metcca_results_pBonf_sig.txt", col.names=T,quote=F,row.names=F)
+```
+
+
+
+```{r}
+df <- read.table("./data/metcca_results_pBonf_sig.txt", header=TRUE)
+
+
+df[order(-df$r_1, df$genes), ]
+```
+
+
+```{r}
+df[df$gene == 'AGT', ]
+```
+
+
